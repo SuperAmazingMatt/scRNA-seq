@@ -1,6 +1,8 @@
 # Inputs and generated outputs
 data/
 results/
+logs/
+slurm-*.out
 *.fastq
 *.fastq.gz
 *.fq
