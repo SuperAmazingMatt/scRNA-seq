@@ -1,0 +1,29 @@
+# Inputs and generated outputs
+data/
+results/
+*.fastq
+*.fastq.gz
+*.fq
+*.fq.gz
+*.bam
+*.bai
+*.cram
+*.crai
+*.h5
+*.h5ad
+*.rds
+*.RData
+*.Rhistory
+*.mtx
+*.mtx.gz
+*.tsv
+*.tsv.gz
+
+# Local sessions, configuration and temporary files
+.Rproj.user/
+.Renviron
+.env
+.env.*
+.build/
+.history/
+~$*
