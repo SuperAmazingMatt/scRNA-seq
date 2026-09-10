@@ -8,9 +8,28 @@ These generalised examples have not been run on a supplied dataset. The shell sc
 
 | File | Purpose |
 |---|---|
+| [seurat_workflows.Rmd](seurat_workflows.Rmd) | R Markdown with both R workflows, step explanations and analysis disabled when knitting. |
 | [sample_01_cellranger.sh](scripts/sample_01_cellranger.sh) | Run Cell Ranger for one sample through Slurm, using generic input paths. |
 | [single_sample_02_seurat.R](scripts/single_sample_02_seurat.R) | Process one independent sample. |
 | [merged_02_seurat.R](scripts/merged_02_seurat.R) | Combine three samples for pooled processing and plots coloured by sample. |
+
+## Read the R Markdown guide
+
+Open [seurat_workflows.Rmd](seurat_workflows.Rmd) in RStudio. It contains the full
+code from both R scripts in separate workflows, with explanations of inputs,
+parameters, plots and saved outputs. Choose the single-sample or three-sample
+workflow to match the inputs.
+
+With `rmarkdown`, `knitr` and Pandoc available, **Knit** creates an HTML guide.
+All analysis chunks have `eval=FALSE`, so knitting displays the code without
+running Seurat or reading data. Only the document-options chunk runs. See the
+[knitr option reference](https://yihui.org/knitr/options/).
+
+Interactive RStudio Run controls do execute code. Use them only for an intended
+analysis, in a dedicated session with the repository root as the working
+directory, and follow the chosen workflow in order. Both workflows stop after
+saving the object. If changing code, keep the matching R script and R Markdown
+chunks consistent. Generated HTML stays local and is ignored by Git.
 
 ## Run Cell Ranger from the terminal
 

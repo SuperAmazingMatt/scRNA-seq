@@ -29,3 +29,10 @@ slurm-*.out
 .build/
 .history/
 ~$*
+
+# Rendered R Markdown guide
+seurat_workflows.html
+seurat_workflows_files/
+seurat_workflows_cache/
+seurat_workflows.knit.md
+seurat_workflows.utf8.md

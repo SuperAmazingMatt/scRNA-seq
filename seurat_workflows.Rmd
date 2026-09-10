@@ -1,0 +1,645 @@
+---
+title: "Seurat workflows for single and merged samples"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    toc_float: true
+    code_folding: show
+---
+
+```{r document-setup, include=FALSE, eval=TRUE}
+knitr::opts_chunk$set(
+  eval = FALSE, echo = TRUE, cache = FALSE, tidy = FALSE, error = FALSE
+)
+```
+
+# Using this document
+
+This R Markdown document explains two Seurat 5 workflows: an independent
+single-sample analysis and a pooled analysis of three samples. Each workflow
+loads filtered raw UMI counts, records initial cell quality, normalises counts,
+calculates PCA and UMAP, and saves a Seurat object. Choose the workflow that
+matches the inputs. The single sample is separate from the three-sample merge.
+
+**Status:** this is code with explanations. Preparing this document has not run
+either analysis, and no cell counts, plots or biological findings are reported.
+The R code in each workflow reproduces its matching script in `scripts/`.
+
+Open this file in RStudio to read the explanation alongside the code. With
+`rmarkdown`, `knitr` and Pandoc available, **Knit** creates an HTML guide showing
+the code without running the analysis. Every analysis chunk explicitly uses
+`eval=FALSE`; the hidden first chunk only sets document options. This follows
+the [knitr chunk-option documentation](https://yihui.org/knitr/options/).
+
+For an intentional analysis, use a dedicated interactive RStudio session and
+set its working directory to the repository root. Preserve any other active
+analysis session. Run the chosen workflow's chunks in order, inspecting the
+outputs before continuing. RStudio's interactive Run controls execute code;
+`eval=FALSE` controls knitting, not those manual Run controls. Keep the other
+workflow unexecuted. Both workflows retain their RStudio checks and end at
+`# STOP HERE` after `saveRDS()`.
+
+## Inputs and packages
+
+The analysis needs `Seurat` version 5 or later, `SeuratObject`, `dplyr`, `ggplot2`
+and `patchwork`. Package checks report missing software without installing it.
+Knitting the guide alone does not require Seurat or input matrices.
+
+Use the following directories relative to the repository root:
+
+```text
+data/
+  single_sample/filtered_feature_bc_matrix/
+  sample_1/filtered_feature_bc_matrix/
+  sample_2/filtered_feature_bc_matrix/
+  sample_3/filtered_feature_bc_matrix/
+```
+
+Each matrix directory contains matching `matrix.mtx.gz`, `features.tsv.gz` and
+`barcodes.tsv.gz` files. The single-sample workflow also accepts uncompressed
+versions. These must be raw UMI counts, not previously normalised values. The
+sample names are editable placeholders; no organism or biological group is
+assumed. The [README](README.md) explains how the terminal Cell Ranger script
+produces these inputs.
+
+## Parameters to review
+
+| Step | Setting in the code | Meaning |
+|---|---|---|
+| Object creation | `min.cells = 3` | Retain features detected in at least three cells within an input sample. |
+| Object creation | `min.features = 200` | Initially retain cells with at least 200 detected features. |
+| Subsequent cell filter | `nFeature_RNA > 200` | Retain cells with strictly more than 200 detected features. |
+| Normalisation | `LogNormalize`, scale factor 10,000 | Adjust counts for cell totals, scale and log-transform. |
+| Variable features | `vst`, 2,000 requested | Identify features with high variability for PCA. |
+| Scaling and PCA | Scale all retained genes; use variable features for PCA | Separate the scaling scope from the PCA input. |
+| UMAP | PCs 1–10; random seed 42 | Calculate an exploratory embedding from the selected PCs. |
+
+These settings are examples to review against the data. No mitochondrial or
+upper-count filter is included. Inspect quality distributions before deciding
+on further filtering. Enough cells and variable features must remain for PCA
+and UMAP, and scaling all genes can require substantial memory. A fixed seed
+helps repeatability within a recorded software environment; software versions
+still matter. The [Seurat introductory workflow](https://satijalab.org/seurat/articles/pbmc3k_tutorial.html)
+provides method background.
+
+# Single-sample workflow
+
+This section corresponds to [single_sample_02_seurat.R](scripts/single_sample_02_seurat.R).
+It uses only `data/single_sample/filtered_feature_bc_matrix/` and creates a new
+folder under `results/single_sample/` for each run.
+
+## Check the RStudio environment
+
+Check the session and required packages before reading data. Seurat 5 assay
+behaviour is selected explicitly, and the random seed is set to 42. If a
+check stops the workflow, resolve the reported problem before proceeding.
+
+```{r single-environment, eval=FALSE}
+# Single-sample Seurat analysis
+# Open in RStudio, set the working directory to the repository root,
+# and review each section before running it.
+# Each run writes to a new results folder.
+
+# 1. Check the RStudio session and installed packages -------------------------
+if (!interactive() || Sys.getenv("RSTUDIO") != "1") {
+  stop("Open this script in RStudio before running it.")
+}
+required_packages <- c("Seurat", "dplyr", "ggplot2", "patchwork")
+missing_packages <- required_packages[!vapply(
+  required_packages, requireNamespace, logical(1), quietly = TRUE
+)]
+if (length(missing_packages) > 0) {
+  stop("Missing packages: ", paste(missing_packages, collapse = ", "),
+       ". Make these packages available in RStudio before continuing.")
+}
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+library(patchwork)
+if (packageVersion("Seurat") < "5.0.0") {
+  stop("This script requires Seurat 5 or later.")
+}
+options(Seurat.object.assay.version = "v5")
+set.seed(42)
+
+```
+
+## Select inputs and prepare output records
+
+Read the input location from the working directory and `sample_id`. Verify
+the matrix files, then create a timestamped folder and record package
+versions and run settings. The `save_plot()` helper displays each plot in
+RStudio and writes a PNG. Inspect the printed paths before continuing.
+
+```{r single-inputs, eval=FALSE}
+# 2. Select the input and create a new output folder -----------------
+project_root <- getwd()
+sample_id <- "single_sample"
+matrix_dir <- file.path(project_root, "data", sample_id,
+                        "filtered_feature_bc_matrix")
+if (!dir.exists(matrix_dir)) {
+  stop("Cannot find the input matrix: ", matrix_dir)
+}
+matrix_files <- file.path(matrix_dir, c("matrix.mtx", "features.tsv", "barcodes.tsv"))
+if (any(!file.exists(matrix_files) & !file.exists(paste0(matrix_files, ".gz")))) {
+  stop("The matrix folder is missing a matrix, feature, or barcode file.")
+}
+
+run_stamp <- format(Sys.time(), "%Y%m%d_%H%M%S")
+run_dir <- file.path(project_root, "results", "single_sample",
+                     paste0("run_", run_stamp))
+if (dir.exists(run_dir)) {
+  stop("This output folder already exists. Run this section again for a new timestamp.")
+}
+if (!dir.create(run_dir, recursive = TRUE)) stop("Cannot create output folder: ", run_dir)
+message("Input matrix: ", matrix_dir)
+message("This run's outputs: ", run_dir)
+
+package_versions <- data.frame(
+  package = required_packages,
+  version = vapply(required_packages, function(x) as.character(packageVersion(x)), "")
+)
+utils::write.csv(package_versions, file.path(run_dir, "package_versions.csv"), row.names = FALSE)
+writeLines(c(
+  paste("Started:", format(Sys.time(), "%Y-%m-%d %H:%M:%S %Z")),
+  paste("R:", R.version.string),
+  paste("RStudio session:", Sys.getenv("RSTUDIO")),
+  paste("Input:", matrix_dir),
+  "Initial settings: min.cells=3; min.features=200; nFeature_RNA > 200.",
+  "LogNormalize scale.factor=10000; vst nfeatures=2000; scale all retained genes.",
+  "PCA uses variable features; UMAP uses PCs 1:10; random seed=42.",
+  "No mitochondrial filter, clustering, or cell annotation is applied."
+), file.path(run_dir, "run_details.txt"))
+
+# Print plots explicitly so RStudio Source displays them, and save a PNG copy.
+save_plot <- function(plot, filename, width = 8, height = 5) {
+  print(plot)
+  ggplot2::ggsave(file.path(run_dir, filename), plot = plot,
+                  width = width, height = height, units = "in", dpi = 300)
+}
+
+```
+
+## Read counts and create a Seurat object
+
+`Read10X()` loads the count matrix. If it returns several measurement
+types, select Gene Expression. Record input dimensions, create the object
+with the initial feature and cell filters, and retain the sample ID.
+The printed object describes cells and features actually retained.
+
+```{r single-object, eval=FALSE}
+# 3. Read the Cell Ranger matrix and create the Seurat object -----------------
+counts <- Seurat::Read10X(data.dir = matrix_dir)
+if (is.list(counts)) {
+  if (!"Gene Expression" %in% names(counts)) stop("Gene Expression matrix not found.")
+  counts <- counts[["Gene Expression"]]
+}
+# Check the supplied matrix without assuming dataset-specific dimensions.
+if (nrow(counts) == 0L || ncol(counts) == 0L) {
+  stop("The input matrix has no features or barcodes.")
+}
+cell_counts <- data.frame(
+  stage = "Cell Ranger filtered matrix",
+  features = nrow(counts), cells = ncol(counts)
+)
+seurat_object <- Seurat::CreateSeuratObject(
+  counts = counts, project = sample_id, min.cells = 3, min.features = 200
+)
+seurat_object$sample_id <- sample_id
+cell_counts <- rbind(cell_counts, data.frame(
+  stage = "CreateSeuratObject min.cells 3 and min.features 200",
+  features = nrow(seurat_object), cells = ncol(seurat_object)
+))
+print(seurat_object)
+
+```
+
+## Inspect quality and filter cells
+
+Violin plots show the distribution of detected genes and total UMI counts;
+the scatter plot shows their relationship. Inspect these before applying
+the strict `nFeature_RNA > 200` filter. The stage-count CSV records the
+effect of filtering, and the metadata CSV retains per-cell measurements.
+These plots alone do not establish a complete quality-control decision.
+
+```{r single-qc, eval=FALSE}
+# 4. Inspect cell quality and apply the initial feature filter --------
+p_qc_violin <- Seurat::VlnPlot(
+  seurat_object, features = c("nFeature_RNA", "nCount_RNA"), ncol = 2
+)
+save_plot(p_qc_violin, "qc_violin_before_filter.png")
+p_qc_scatter <- Seurat::FeatureScatter(
+  seurat_object, feature1 = "nCount_RNA", feature2 = "nFeature_RNA"
+)
+save_plot(p_qc_scatter, "qc_scatter_before_filter.png")
+
+# This example retains cells with more than 200 detected genes.
+# Select additional thresholds only after inspecting the data.
+# No mitochondrial or upper-count filter is applied.
+seurat_object <- subset(seurat_object, subset = nFeature_RNA > 200)
+cell_counts <- rbind(cell_counts, data.frame(
+  stage = "After nFeature_RNA greater than 200",
+  features = nrow(seurat_object), cells = ncol(seurat_object)
+))
+print(cell_counts)
+utils::write.csv(cell_counts, file.path(run_dir, "cell_counts_by_stage.csv"), row.names = FALSE)
+utils::write.csv(seurat_object[[]], file.path(run_dir, "cell_metadata_after_filter.csv"))
+
+```
+
+## Normalise and find variable features
+
+Log-normalise counts and request 2,000 variable features using `vst`.
+The two plots show feature variability, with the top ten labelled in the
+second plot. Their names are also written to a CSV. These are variable
+features for dimensional reduction; no cell-type markers are identified.
+
+```{r single-normalise, eval=FALSE}
+# 5. Normalise counts and identify 2,000 variable features --------------------
+seurat_object <- Seurat::NormalizeData(
+  seurat_object, normalization.method = "LogNormalize", scale.factor = 1e4
+)
+seurat_object <- Seurat::FindVariableFeatures(
+  seurat_object, selection.method = "vst", nfeatures = 2000
+)
+top_vf <- head(Seurat::VariableFeatures(seurat_object), 10)
+print(top_vf)
+utils::write.csv(data.frame(gene = top_vf),
+                 file.path(run_dir, "top10_variable_features.csv"), row.names = FALSE)
+p_variable <- Seurat::VariableFeaturePlot(seurat_object)
+p_variable_labels <- Seurat::LabelPoints(
+  plot = p_variable, points = top_vf, repel = TRUE, xnudge = 0, ynudge = 0
+)
+save_plot(p_variable, "variable_features.png")
+save_plot(p_variable_labels, "variable_features_top10.png")
+
+```
+
+## Scale genes and examine PCA
+
+Scale all retained genes, then calculate PCA from the selected variable
+features. Save the leading feature loadings, loading plots, cell embedding
+and a PC 1 heatmap. Inspect which genes drive the leading components and
+whether technical variation may contribute before using PCs 1–10.
+
+```{r single-pca, eval=FALSE}
+# 6. Scale all retained genes and perform PCA on variable features ------------
+# Scaling every retained gene uses more memory than
+# scaling only the variable genes. PCA still uses the selected variable genes.
+all.genes <- rownames(seurat_object)
+seurat_object <- Seurat::ScaleData(seurat_object, features = all.genes)
+seurat_object <- Seurat::RunPCA(
+  seurat_object, features = Seurat::VariableFeatures(object = seurat_object),
+  seed.use = 42
+)
+print(seurat_object[["pca"]], dims = 1:5, nfeatures = 5)
+writeLines(capture.output(print(seurat_object[["pca"]], dims = 1:5, nfeatures = 5)),
+           file.path(run_dir, "pca_top_features.txt"))
+
+p_pca_loadings <- Seurat::VizDimLoadings(seurat_object, dims = 1:2, reduction = "pca")
+save_plot(p_pca_loadings, "pca_loadings_dims1_2.png", width = 10, height = 6)
+p_pca <- Seurat::DimPlot(seurat_object, reduction = "pca")
+save_plot(p_pca, "pca_cells.png")
+# fast=FALSE returns a plot that can be printed and saved with ggsave.
+# Display PC 1 with 500 cells and balanced feature selection.
+p_pca_heatmap <- Seurat::DimHeatmap(
+  seurat_object, dims = 1, cells = 500, balanced = TRUE, fast = FALSE
+)
+save_plot(p_pca_heatmap, "pca_heatmap_dim1.png", width = 10, height = 7)
+
+```
+
+## Calculate an exploratory UMAP
+
+Use PCs 1–10 to calculate UMAP and save the cell embedding. Nearby points
+represent similarity in this reduced representation. The plot does not
+assign clusters or cell types, and visual separation is not a statistical
+test of a biological difference.
+
+```{r single-umap, eval=FALSE}
+# 7. Calculate and display UMAP using PCs 1-10 -------------------
+# The seed improves repeatability within the recorded software environment.
+# This is an exploratory embedding; no clusters or cell types are assigned.
+seurat_object <- Seurat::RunUMAP(seurat_object, dims = 1:10, seed.use = 42)
+p_umap <- Seurat::DimPlot(seurat_object, reduction = "umap")
+save_plot(p_umap, "umap_cells.png")
+
+```
+
+## Record the session and save the object
+
+After the preceding steps succeed, save the actual session information
+and the Seurat object as `single_sample_seurat_object.rds` in the run
+folder. The RDS preserves the object for later authorised work. This is
+the final analysis step in the single-sample workflow.
+
+```{r single-save, eval=FALSE}
+# 8. Record the session and save the object
+# Run this final section only after the earlier sections complete successfully.
+writeLines(capture.output(sessionInfo()), file.path(run_dir, "sessionInfo.txt"))
+rds_path <- file.path(run_dir, "single_sample_seurat_object.rds")
+message("Saving the Seurat object to: ", rds_path)
+saveRDS(seurat_object, file = rds_path)
+# STOP HERE
+```
+
+# Three-sample merged workflow
+
+This section corresponds to [merged_02_seurat.R](scripts/merged_02_seurat.R).
+It uses `sample_1`, `sample_2` and `sample_3` only. Each input is filtered at
+object creation before the objects are combined for pooled processing.
+The independent `single_sample` input is not part of this merge.
+
+## Check the environment and configure three inputs
+
+Check RStudio and packages, then define the three sample IDs, labels and
+matrix paths in `sample_info`. Verify the compressed matrix files and
+create a new folder under `results/merged/`. The input table and initial
+session information document the configuration actually used.
+
+```{r merged-setup, eval=FALSE}
+# Three-sample Seurat analysis
+# Open in RStudio, set the working directory to the repository root,
+# and review each section before running it.
+# Inputs are filtered feature-barcode matrices containing raw UMI counts.
+# merge() combines the samples without batch correction or integration.
+
+# Setup -------------------------------------------------------------------
+if (!interactive() || Sys.getenv("RSTUDIO") != "1") {
+  stop("Open this script in RStudio and run it there, not with Rscript.")
+}
+required_packages <- c("Seurat", "SeuratObject", "dplyr", "ggplot2", "patchwork")
+missing_packages <- required_packages[
+  !vapply(required_packages, requireNamespace, logical(1), quietly = TRUE)
+]
+if (length(missing_packages) > 0L) {
+  stop("Missing packages: ", paste(missing_packages, collapse = ", "),
+       ". Make these packages available in RStudio before continuing.")
+}
+library(dplyr)
+library(ggplot2)
+library(Seurat)
+library(patchwork)
+if (packageVersion("Seurat") < "5.0.0") {
+  stop("This merged workflow requires Seurat 5 or later.")
+}
+options(Seurat.object.assay.version = "v5")
+set.seed(42)
+
+project_dir <- getwd()
+sample_info <- data.frame(
+  sample_id = c("sample_1", "sample_2", "sample_3"),
+  sample_label = c("sample_1", "sample_2", "sample_3"),
+  stringsAsFactors = FALSE
+)
+sample_info$matrix_dir <- file.path(
+  project_dir, "data", sample_info$sample_id, "filtered_feature_bc_matrix"
+)
+required_files <- c("matrix.mtx.gz", "features.tsv.gz", "barcodes.tsv.gz")
+for (matrix_dir in sample_info$matrix_dir) {
+  if (!all(file.exists(file.path(matrix_dir, required_files)))) {
+    stop("A required matrix file is missing from: ", matrix_dir)
+  }
+}
+
+# Each run has its own output folder so previous results are preserved.
+run_id <- paste0("merged_", format(Sys.time(), "%Y%m%d_%H%M%S"))
+output_dir <- file.path(project_dir, "results", "merged", run_id)
+if (dir.exists(output_dir)) stop("Output folder already exists: ", output_dir)
+if (!dir.create(output_dir, recursive = TRUE)) stop("Cannot create: ", output_dir)
+write.csv(sample_info, file.path(output_dir, "sample_inputs.csv"), row.names = FALSE)
+capture.output(sessionInfo(), file = file.path(output_dir, "sessionInfo_start.txt"))
+message("Results will be saved in: ", output_dir)
+
+```
+
+## Create an object for each sample
+
+Read each Gene Expression matrix and apply `min.cells = 3` and
+`min.features = 200` separately within that sample. Store both sample ID
+and label in cell metadata. Record input and retained cell counts for
+each sample so unequal losses can be inspected later.
+
+```{r merged-objects, eval=FALSE}
+# Read matrices and create one object per sample ---------------------------
+# Initial filters: genes detected in >=3 cells within each sample, and cells
+# with >=200 detected genes at object creation. We record those removals.
+sample_objects <- setNames(vector("list", nrow(sample_info)), sample_info$sample_id)
+cell_counts <- data.frame(sample_id = sample_info$sample_id,
+                          cellranger_barcodes = NA_integer_,
+                          after_creation = NA_integer_)
+for (i in seq_len(nrow(sample_info))) {
+  counts <- Read10X(data.dir = sample_info$matrix_dir[i])
+  if (is.list(counts)) {
+    if (!"Gene Expression" %in% names(counts)) stop("Gene Expression counts missing.")
+    counts <- counts[["Gene Expression"]]
+  }
+  cell_counts$cellranger_barcodes[i] <- ncol(counts)
+  sample_object <- CreateSeuratObject(
+    counts = counts, project = sample_info$sample_id[i],
+    min.cells = 3, min.features = 200
+  )
+  if (ncol(sample_object) == 0L) stop("No cells retained for ", sample_info$sample_id[i])
+  sample_object$sample_id <- sample_info$sample_id[i]
+  sample_object$sample_label <- sample_info$sample_label[i]
+  cell_counts$after_creation[i] <- ncol(sample_object)
+  sample_objects[[i]] <- sample_object
+}
+
+```
+
+## Merge samples and join count layers
+
+Merge the three objects with sample prefixes on barcodes, then check
+that barcodes are unique and the total cell count is preserved.
+`JoinLayers()` joins the Seurat 5 count layers for pooled variable-feature
+selection. The layer record documents this change. Sample labels remain
+available for plots. This operation does not correct batch effects or
+establish comparability of the experiments. See the
+[merge reference](https://satijalab.github.io/seurat-object/reference/merge.Seurat.html)
+and [JoinLayers reference](https://satijalab.github.io/seurat-object/reference/SplitLayers.html).
+
+```{r merged-join, eval=FALSE}
+# Merge all three samples before the common analysis ----------------------
+# Prefix barcodes to keep them unique and preserve each cell's sample labels.
+seurat_merged <- merge(
+  x = sample_objects[["sample_1"]],
+  y = list(sample_objects[["sample_2"]], sample_objects[["sample_3"]]),
+  add.cell.ids = sample_info$sample_id,
+  project = "merged_samples", merge.data = FALSE
+)
+stopifnot(ncol(seurat_merged) == sum(cell_counts$after_creation),
+          !anyDuplicated(colnames(seurat_merged)))
+
+# Seurat 5 preserves separate count layers when merging. Join counts into one
+# layer so variable-feature selection uses the pooled dataset rather than a
+# consensus of per-sample variable features.
+# API: https://satijalab.github.io/seurat-object/reference/SplitLayers.html
+layers_before <- SeuratObject::Layers(seurat_merged[["RNA"]])
+seurat_merged <- SeuratObject::JoinLayers(seurat_merged, assay = "RNA")
+layers_after <- SeuratObject::Layers(seurat_merged[["RNA"]])
+stopifnot(identical(layers_after, "counts"))
+capture.output(list(before_join = layers_before, after_join = layers_after),
+               file = file.path(output_dir, "merged_layers.txt"))
+seurat_merged$sample_label <- factor(
+  seurat_merged$sample_label, levels = c("sample_1", "sample_2", "sample_3")
+)
+Idents(seurat_merged) <- "sample_label"
+rm(counts, sample_object, sample_objects)
+
+```
+
+## Inspect quality by sample and filter cells
+
+Plot detected features and total counts by sample, then apply the strict
+`nFeature_RNA > 200` filter to the merged object. Save metadata before and
+after filtering, and record retained cells per sample. If any sample has
+no cells remaining, the workflow stops for review. Interpret differences
+in retention alongside the input quality and experimental design.
+
+```{r merged-qc, eval=FALSE}
+# QC plots and the initial feature filter -----------------------------------
+qc_violin <- VlnPlot(
+  seurat_merged, features = c("nFeature_RNA", "nCount_RNA"),
+  group.by = "sample_label", ncol = 2
+)
+print(qc_violin)
+ggsave(file.path(output_dir, "qc_violin_before_filter.png"), qc_violin,
+       width = 10, height = 5, dpi = 300)
+qc_scatter <- FeatureScatter(
+  seurat_merged, feature1 = "nCount_RNA", feature2 = "nFeature_RNA",
+  group.by = "sample_label"
+)
+print(qc_scatter)
+ggsave(file.path(output_dir, "qc_scatter_before_filter.png"), qc_scatter,
+       width = 7, height = 5, dpi = 300)
+write.csv(seurat_merged[[]], file.path(output_dir, "cell_metadata_before_filter.csv"))
+
+# This example retains cells with more than 200 detected genes.
+# No mitochondrial or upper-count threshold is applied.
+# Choose suitable thresholds after inspecting the data.
+seurat_merged <- subset(seurat_merged, subset = nFeature_RNA > 200)
+cell_counts$after_feature_filter <- as.integer(table(factor(
+  seurat_merged$sample_id, levels = sample_info$sample_id
+)))
+print(cell_counts)
+write.csv(cell_counts, file.path(output_dir, "cell_counts_by_stage.csv"), row.names = FALSE)
+write.csv(seurat_merged[[]], file.path(output_dir, "cell_metadata_after_filter.csv"))
+if (any(cell_counts$after_feature_filter == 0L)) {
+  stop("At least one sample has no cells after filtering. Review QC before continuing.")
+}
+
+```
+
+## Normalise pooled counts and find variable genes
+
+Apply LogNormalize to the merged object and select variable genes from
+the joined assay. Save the selected genes and a variability plot with
+the top ten labelled. Review whether selected features may reflect
+technical differences as well as biology; this step is not integration.
+
+```{r merged-normalise, eval=FALSE}
+# Normalise and identify variable genes -----------------------------------
+seurat_merged <- NormalizeData(
+  seurat_merged, normalization.method = "LogNormalize", scale.factor = 1e4
+)
+seurat_merged <- FindVariableFeatures(
+  seurat_merged, selection.method = "vst", nfeatures = 2000
+)
+top_vf <- head(VariableFeatures(seurat_merged), 10)
+print(top_vf)
+write.csv(data.frame(gene = VariableFeatures(seurat_merged)),
+          file.path(output_dir, "variable_genes.csv"), row.names = FALSE)
+plot1 <- VariableFeaturePlot(seurat_merged)
+plot2 <- LabelPoints(plot1, points = top_vf, repel = TRUE, xnudge = 0, ynudge = 0)
+print(plot1)
+print(plot2)
+ggsave(file.path(output_dir, "variable_genes_top10.png"), plot2,
+       width = 8, height = 6, dpi = 300)
+
+```
+
+## Examine PCA and sample relationships
+
+Scale all retained genes and calculate PCA from variable features. Save
+loadings, a PCA plot coloured by sample and a PC 1 heatmap. Compare sample
+distributions and inspect the genes associated with the components.
+Sample separation can have biological or technical explanations.
+
+```{r merged-pca, eval=FALSE}
+# Scale all retained genes and run PCA ------------------------------------
+# Scaling all retained genes uses more memory than scaling variable genes only.
+all.genes <- rownames(seurat_merged)
+seurat_merged <- ScaleData(seurat_merged, features = all.genes)
+seurat_merged <- RunPCA(
+  seurat_merged, features = VariableFeatures(seurat_merged), seed.use = 42
+)
+# [["pca"]] accesses the stored PCA reduction.
+print(seurat_merged[["pca"]], dims = 1:5, nfeatures = 5)
+capture.output(print(seurat_merged[["pca"]], dims = 1:5, nfeatures = 5),
+               file = file.path(output_dir, "pca_top_loadings.txt"))
+pca_loadings <- VizDimLoadings(seurat_merged, dims = 1:2, reduction = "pca")
+print(pca_loadings)
+ggsave(file.path(output_dir, "pca_loadings.png"), pca_loadings,
+       width = 10, height = 5, dpi = 300)
+pca_plot <- DimPlot(seurat_merged, reduction = "pca", group.by = "sample_label")
+print(pca_plot)
+ggsave(file.path(output_dir, "pca_by_sample.png"), pca_plot,
+       width = 7, height = 5, dpi = 300)
+# fast=FALSE changes the drawing method so the same heatmap can be saved.
+pca_heatmap <- DimHeatmap(
+  seurat_merged, dims = 1, cells = 500, balanced = TRUE, fast = FALSE
+)
+print(pca_heatmap)
+ggsave(file.path(output_dir, "pca_heatmap.png"), pca_heatmap,
+       width = 10, height = 7, dpi = 300)
+
+```
+
+## Calculate UMAP and save the merged object
+
+Calculate UMAP using PCs 1–10, retaining sample colours. Save the UMAP,
+final cell metadata, session information and `seurat_merged_saved.rds`.
+The final save is the stopping point. No clustering, marker detection,
+cell-type annotation or integration follows it in this workflow.
+
+```{r merged-save, eval=FALSE}
+# UMAP and the final saved object -----------------------------------------
+# PCs 1-10 are an initial setting to review for the supplied data.
+seurat_merged <- RunUMAP(seurat_merged, dims = 1:10, seed.use = 42)
+umap_plot <- DimPlot(seurat_merged, reduction = "umap", group.by = "sample_label")
+print(umap_plot)
+ggsave(file.path(output_dir, "umap_by_sample.png"), umap_plot,
+       width = 7, height = 5, dpi = 300)
+write.csv(seurat_merged[[]], file.path(output_dir, "cell_metadata_final.csv"))
+capture.output(sessionInfo(), file = file.path(output_dir, "sessionInfo_final.txt"))
+message("Saving the merged object. No analysis after STOP HERE is included.")
+saveRDS(seurat_merged, file = file.path(output_dir, "seurat_merged_saved.rds"))
+# STOP HERE
+```
+
+# Outputs and interpretation
+
+The code above specifies outputs that will be created only when the relevant
+analysis chunks are intentionally run. This document contains no executed
+analysis results.
+
+| Output | What to inspect after a run |
+|---|---|
+| `cell_counts_by_stage.csv` | Cells retained at each stage and, for the merge, in each sample. |
+| Cell metadata CSV files | Per-cell counts, detected features and preserved sample identities. |
+| QC and variable-feature PNG files | Quality distributions, count relationships and selected features. |
+| PCA plots, heatmaps and loadings | Genes and cell patterns contributing to leading components. |
+| UMAP PNG file | Exploratory cell relationships, interpreted with sample and quality information. |
+| Session records and saved RDS | Software environment and the final object for later work. |
+
+For a future run, record the actual retained counts, reasons for parameter
+choices, observations from each plot and any unresolved limitations before
+drawing conclusions. Keep interpretation separate from the method description.
+`results/`, input data and local session files are ignored by Git. The generated
+HTML guide is also ignored; the `.Rmd` is the shared source. Review generated
+metadata separately before sharing it.
+
+When changing analysis code, update its matching `.R` script and the
+corresponding chunks here together so these two representations remain in sync.
