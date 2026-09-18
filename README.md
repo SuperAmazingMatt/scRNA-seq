@@ -2,7 +2,7 @@
 
 A terminal script runs Cell Ranger on one sample in a Slurm job. Two R scripts then support exploratory analysis with Seurat 5: one processes a single sample, and one merges three samples while preserving their labels. Both R scripts stop after saving a Seurat object.
 
-These generalised examples have not been run on a supplied dataset. The shell script has been checked with `bash -n`; the R scripts have been reviewed as text only. The code examples include no input data. A separate [poster portfolio](posters/README.md) shows original bulk RNA-seq graphs with study-specific findings obscured.
+These generalised examples have not been run on a supplied dataset. The shell script has been checked with `bash -n`; the R scripts have been reviewed as text only. This repository contains code and a general explanation; it includes no input data or analysis outputs.
 
 ## Files
 
